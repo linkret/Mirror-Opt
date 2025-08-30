@@ -1,79 +1,11 @@
 using JuMP
 using HiGHS  # or GLPK, Cbc, Gurobi
+import MathOptInterface as MOI
 
-const N = 16
-
-const POINT_VALUE_MATRIX = [
-    4 2 6 3 1 5 8 7 6 9 1 9 4 7 8 3;
-    8 7 1 5 6 3 2 4 9 5 7 3 6 9 1 8;
-    8 9 5 8 4 7 9 6 1 8 3 4 8 6 5 7;
-    1 9 3 2 7 6 1 2 4 9 5 7 3 2 8 6;
-    9 7 4 6 5 1 7 8 6 3 2 8 1 5 2 9;
-    2 8 4 1 9 9 3 7 2 6 4 5 8 3 9 1;
-    3 5 8 5 2 6 4 8 9 1 6 1 2 4 3 9;
-    5 1 8 4 3 9 2 1 7 5 3 7 9 7 4 2;
-    7 8 2 9 6 4 7 3 5 4 8 9 6 1 7 5;
-    4 2 6 3 1 5 9 5 8 2 9 4 3 6 1 8;
-    5 4 1 6 9 2 3 7 1 5 4 6 7 2 8 3;
-    6 3 7 2 4 8 5 6 9 3 2 7 1 8 5 4;
-    2 9 5 1 7 4 1 3 6 5 8 4 7 3 2 6;
-    7 4 3 5 2 6 6 1 2 4 1 7 5 9 3 8;
-    1 6 2 4 8 5 3 7 4 9 3 2 6 1 7 5;
-    7 5 9 3 6 9 8 2 7 4 6 2 8 5 8 1
-]
-# TODO: verify value matrix matches official problem statement
-
-const EXAMPLE_SOLUTION = [
-    '.' 'f' '.' 'v' 'v' 'v' 'V' 'V' 'V' '.' '.' '.' 'z' 'Z' '.' '.';
-    'f' 'f' '.' '.' '.' 'v' 'V' '.' '.' '.' 'z' 'z' 'z' 'Z' 'Z' 'Z';
-    '.' 'f' 'f' '.' '.' 'v' 'V' '.' '.' '.' 'z' '.' '.' '.' '.' 'Z';
-    '.' 'F' 'F' '.' '.' '.' '.' '.' '.' '.' '.' '.' '.' '.' '.' '.';
-    'F' 'F' '.' '.' 't' '.' '.' 'T' '.' '.' '.' 'X' '.' '.' 'x' '.';
-    '.' 'F' '.' '.' 't' '.' '.' 'T' '.' '.' 'X' 'X' 'X' 'x' 'x' 'x';
-    '.' '.' '.' 't' 't' 't' 'T' 'T' 'T' '.' '.' 'X' '.' '.' 'x' '.';
-    'I' 'i' '.' '.' '.' '.' '.' '.' '.' '.' '.' '.' '.' '.' '.' '.';
-    'I' 'i' '.' 'L' '.' '.' '.' '.' '.' '.' 'N' 'N' '.' 'U' 'U' 'U';
-    'I' 'i' '.' 'L' 'L' 'L' 'L' '.' 'N' 'N' 'N' '.' '.' 'U' '.' 'U';
-    'I' 'i' '.' 'l' 'l' 'l' 'l' '.' 'n' 'n' 'n' '.' '.' 'u' '.' 'u';
-    'I' 'i' '.' 'l' '.' '.' '.' '.' '.' '.' 'n' 'n' '.' 'u' 'u' 'u';
-    '.' '.' '.' '.' '.' 'y' 'y' 'y' 'y' '.' '.' '.' '.' '.' '.' '.';
-    'P' 'P' 'p' 'p' '.' '.' '.' 'y' '.' '.' 'w' '.' '.' '.' '.' 'W';
-    'P' 'P' 'p' 'p' '.' '.' '.' 'Y' '.' '.' 'w' 'w' '.' '.' 'W' 'W';
-    'P' '.' '.' 'p' '.' 'Y' 'Y' 'Y' 'Y' '.' '.' 'w' 'w' 'W' 'W' '.'
-]
-# TODO: verify, seems fine
-
-const A = POINT_VALUE_MATRIX
-const H, W = size(A)
-const LETTERS = [:F, :I, :L, :N, :P, :T, :U, :V, :W, :X, :Y, :Z]
-
-# Derive pentomino base shapes from the uppercase placements in EXAMPLE_SOLUTION.
-# Shapes are returned as 5 relative (x,y) offsets with min x/y at 0.
-const SHAPES = let
-    function extract_shape(letter::Char, grid::AbstractMatrix{Char})
-        coords = Tuple{Int,Int}[]
-        for y in 1:size(grid,1), x in 1:size(grid,2)
-            if grid[y,x] == letter
-                push!(coords, (x,y))
-            end
-        end
-        length(coords) == 5 || error("Expected 5 cells for '$letter' in EXAMPLE_SOLUTION, got $(length(coords))")
-        minx = minimum(first.(coords))
-        miny = minimum(last.(coords))
-        sort([(x - minx, y - miny) for (x,y) in coords])
-    end
-
-    shapes = Dict{Symbol, Vector{Tuple{Int,Int}}}()
-    for s in LETTERS
-        ch = first(String(s))  # uppercase Char for the symbol
-        shapes[s] = extract_shape(ch, EXAMPLE_SOLUTION)
-    end
-    shapes
+if !isdefined(Main, :CONSTANTS_INCLUDED)
+    include("Constants.jl")
+    const CONSTANTS_INCLUDED = true
 end
-
-print(SHAPES)
-
-exit(0)
 
 # 2D transforms
 rot90((x,y)) = (-y, x)
@@ -110,9 +42,8 @@ translate(cells, ax, ay) = [(x+ax, y+ay) for (x,y) in cells]
 
 in_bounds((x,y)) = 1 ≤ x ≤ W && 1 ≤ y ≤ H
 
-# Compute the set of external edges of a placed shape (grid aligned).
 # Each edge is identified by (cell, dir), with dir ∈ (:U,:D,:L,:R).
-const DIRS = Dict(:U => (0,1), :D => (0,-1), :L => (-1,0), :R => (1,0))
+# Compute the set of external edges of a placed shape (grid aligned).
 function external_edges(cells::Vector{Tuple{Int,Int}})
     cellset = Set(cells)
     edges = Vector{Tuple{Tuple{Int,Int},Symbol}}()
@@ -137,7 +68,8 @@ function reflect_across_edge(cells::Vector{Tuple{Int,Int}}, edge::Tuple{Tuple{In
         return [(2*ex + δ - x, y) for (x,y) in cells]
     else
         # horizontal mirror line: y = ey ± 0.5
-        δ = (d == :U) ? 1 : -1
+        # For :D the mirror line is y = ey + 0.5 (neighbor below), for :U it's y = ey - 0.5
+        δ = (d == :D) ? 1 : -1
         return [(x, 2*ey + δ - y) for (x,y) in cells]
     end
 end
@@ -181,16 +113,22 @@ function build_pairs(A, ups)
             for e in external_edges(U)
                 L = reflect_across_edge(U, e)
                 if all(in_bounds, L)
-                    # ensure L is a pure mirror of U (already the case by construction)
-                    # de-dup: canonical order
                     cu = sort(U)
                     cl = sort(L)
                     key = (Tuple(cu), Tuple(cl))
                     if !(key in seen)
                         push!(seen, key)
+                        # illegal if the mirrored shape shares any cells with the original
+                        if !isempty(intersect(Set(cu), Set(cl)))
+                            continue
+                        end
                         wU = sum(A[y, x] for (x,y) in cu)
                         wL = sum(A[y, x] for (x,y) in cl)
-                        push!(plist, (cellsU = cu, cellsL = cl, weight = wU - wL))
+                        total_sum = wU - wL
+                        # Just a heuristic, risks unoptimality, skipping negative placements
+                        # if total_sum >= 0 
+                        push!(plist, (cellsU = cu, cellsL = cl, weight = total_sum))
+                        #end
                     end
                 end
             end
@@ -202,79 +140,76 @@ end
 
 # Build conflicts between pairs of different letters (overlap or 8-neighbor touch)
 function build_conflicts(pairs)
-    # flatten to indexable list
+    # Flatten to indexable list
     index = Dict{Symbol, Vector{Int}}()
     P = Vector{NamedTuple}()  # each element has fields: t, cells, weight
     for t in LETTERS
         index[t] = Int[]
         for pr in pairs[t]
-            # Heuristic: drop negative-score placements entirely (y == 0)
-            pr.weight < 0 && continue
             push!(index[t], length(P)+1)
             cellsAll = union(Set(pr.cellsU), Set(pr.cellsL)) |> collect
-            push!(P, (t=t, cells=cellsAll, weight=pr.weight))
+            # store both the combined cells and the original U/L partitions
+            push!(P, (t=t, cells=cellsAll, cellsU = pr.cellsU, cellsL = pr.cellsL, weight=pr.weight))
         end
     end
-    # cell->indices map for fast overlap
-    bycell = Dict{Tuple{Int,Int}, Vector{Int}}()
-    for (pid, pr) in enumerate(P)
-        for c in pr.cells
-            push!(get!(bycell, c, Int[]), pid)
-        end
-    end
-    # helper for 8-neighborhood
-    function neighbors8((x,y))
-        ((x-1,y-1),(x,y-1),(x+1,y-1),
+
+    # Build an W x H matrix where each cell contains the list of pair indices
+    # that would occupy that cell or any of its 8-neighbors (used for cell-wise <=1 constraints)
+    occ8 = [Int[] for x in 1:W, y in 1:H]
+
+    # helper for 8-neighborhood including the cell itself
+    function neighborhood8((x,y))
+        ((x,y),
+         (x-1,y-1),(x,y-1),(x+1,y-1),
          (x-1,y),(x+1,y),
          (x-1,y+1),(x,y+1),(x+1,y+1))
     end
-    conflicts = Set{Tuple{Int,Int}}()
-    # overlaps
-    for (_, lst) in bycell
-        for i in 1:length(lst), j in (i+1):length(lst)
-            p, q = lst[i], lst[j]
-            if P[p].t != P[q].t
-                push!(conflicts, (min(p,q), max(p,q)))
-            end
-        end
-    end
-    # 8-neighbor touches
-    occ = Dict{Tuple{Int,Int}, Vector{Int}}()
+
     for (pid, pr) in enumerate(P)
+        # For each cell touched by the pair, add pid to that cell and its neighbors
         for c in pr.cells
-            push!(get!(occ, c, Int[]), pid)
-        end
-    end
-    for (pid, pr) in enumerate(P)
-        for c in pr.cells
-            for nb in neighbors8(c)
-                for q in get(occ, nb, Int[])
-                    if pid < q && P[pid].t != P[q].t
-                        push!(conflicts, (pid, q))
-                    end
+            for nb in neighborhood8(c)
+                if in_bounds(nb)
+                    nx, ny = nb
+                    push!(occ8[nx, ny], pid)
                 end
             end
         end
     end
-    return P, index, collect(conflicts)
+
+    return P, index, occ8
 end
 
 # Build and solve the MILP
 function solve_pentomino(A)
     ups   = enumerate_uppercase_placements()
     pairs = build_pairs(A, ups)
-    P, index, conflicts = build_conflicts(pairs)
+    println("DEBUG: built $(sum(length(pairs[t]) for t in LETTERS)) pairs")
+    P, index, occ8 = build_conflicts(pairs)
 
-    model = Model(HiGHS.Optimizer)  # or GLPK.Optimizer / Cbc.Optimizer / Gurobi.Optimizer
-    set_optimizer_attribute(model, "time_limit", 120.0)  # 2-minute time limit
-    set_silent(model)
+    # If no pairs were generated, return early (no model to build)
+    if length(P) == 0
+        println("WARNING: no candidate pairs; skipping model build")
+        return :NO_PAIRS, NaN, P, Int[]
+    end
 
-    @variable(model, y[1:length(P)], Bin)
+    # Build and solve model inside try/catch to avoid throwing when solver/setup fails
+    status = :ERROR
+    obj = NaN
+    chosen = Int[]
+    try
+        model = Model(HiGHS.Optimizer)  # or GLPK.Optimizer / Cbc.Optimizer / Gurobi.Optimizer
+        #set_optimizer_attribute(model, "time_limit", 600.0)  # 10-minute time limit
+        #set_silent(model)
+
+        @variable(model, y[1:length(P)], Bin)
+
     # at most one pair per letter (allow skipping letters for speed/score)
     for t in LETTERS
         ids = index[t]
         if !isempty(ids)
-            @constraint(model, sum(y[i] for i in ids) <= 1)
+            #@constraint(model, sum(y[i] for i in ids) <= 1)
+            @constraint(model, sum(y[i] for i in ids) == 1)
         end
     end
     # no overlap is already implied by the conflicts set built from overlap;
@@ -282,19 +217,33 @@ function solve_pentomino(A)
     # (Optional) Build cell-wise cap tightening:
     # ...
 
-    # no-touch-even-diagonal across different letters
-    for (p,q) in conflicts
-        @constraint(model, y[p] + y[q] ≤ 1)
+    # Enforce non-overlap / non-touching by cell-wise constraints using occ8
+    # Deduplicate indices per cell, avoid shadowing JuMP variable `y` by using xi, yi.
+    for xi in 1:W, yi in 1:H
+        ids = unique(occ8[xi, yi])
+        if length(ids) > 1
+            @constraint(model, sum(y[i] for i in ids) ≤ 1)
+        end
     end
 
-    @objective(model, Max, sum(P[i].weight * y[i] for i in 1:length(P)))
+        @objective(model, Max, sum(P[i].weight * y[i] for i in 1:length(P)))
 
-    println("WARNING: Skipping optimization!")
-    # optimize!(model)
+        optimize!(model)
 
-    status = termination_status(model)
-    obj    = objective_value(model)
-    chosen = findall(i -> value(y[i]) > 0.5, 1:length(P))
+        status = termination_status(model)
+        # Safely attempt to read objective and variable values; handle cases with no solution
+        try
+            obj    = objective_value(model)
+            chosen = findall(i -> value(y[i]) > 0.5, 1:length(P))
+        catch _err
+            obj = NaN
+            chosen = Int[]
+        end
+    catch err
+        # Log and return a safe failure result instead of throwing
+        println("ERROR: building or solving model failed: ", err)
+        return :ERROR, NaN, P, Int[]
+    end
     return status, obj, P, chosen
 end
 
@@ -308,12 +257,14 @@ function run()
     if !isempty(chosen)
         grid = fill('.', H, W)
         for i in chosen
-            # mark uppercase and lowercase cells distinctly
+            # mark uppercase and mirrored (lowercase) cells distinctly
             up = first(String(P[i].t))
             low = lowercase(string(up))[1]
-            # Attempt to recover U/L from cells by symmetry: not stored in P, mark all as up for now
-            for (x,y) in P[i].cells
+            for (x,y) in P[i].cellsU
                 grid[y,x] = up
+            end
+            for (x,y) in P[i].cellsL
+                grid[y,x] = low
             end
         end
         println("solution grid:")
@@ -322,3 +273,5 @@ function run()
         end
     end
 end
+
+return 0
