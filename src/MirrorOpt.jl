@@ -1,6 +1,6 @@
 using JuMP
 using HiGHS  # or GLPK, Cbc, Gurobi
-import MathOptInterface as MOI
+# import MathOptInterface as MOI
 
 if !isdefined(Main, :CONSTANTS_INCLUDED)
     include("Constants.jl")
@@ -190,6 +190,10 @@ function build_conflicts(pairs)
 
     # neighbor touches: for each pair, look at neighbors of its occupied cells and conflict with pairs occupying those neighbor cells
     println("DEBUG: checking neighbor touches")
+
+    # prepare per-pair neighbor-cell lists (this is what the caller expects)
+    neighcells = [Vector{Tuple{Int,Int}}() for _ in 1:length(P)]
+
     for (pid, pr) in enumerate(P)
         # compute the outer-edge neighbor cells of the whole shape (unique)
         neighs = Set{Tuple{Int,Int}}()
@@ -206,6 +210,10 @@ function build_conflicts(pairs)
                 delete!(neighs, c)
             end
         end
+
+        # record neighbor cells for this pair (caller uses this)
+        neighcells[pid] = collect(neighs)
+
         # iterate outer neighbors (unique) once and add conflicts with pairs occupying them
         for nb in neighs
             nx, ny = nb
@@ -217,7 +225,7 @@ function build_conflicts(pairs)
         end
     end
 
-    return P, index, occ, collect(conflicts)
+    return P, index, occ, neighcells
 end
 
 # Build and solve the MILP
@@ -225,8 +233,8 @@ function solve_pentomino(A)
     ups   = enumerate_uppercase_placements()
     pairs = build_pairs(A, ups)
     println("DEBUG: built $(sum(length(pairs[t]) for t in LETTERS)) pairs")
-    P, index, occ, conflicts = build_conflicts(pairs)
-    println("DEBUG: found $(length(conflicts)) conflicts")
+    P, index, occ, neighcells = build_conflicts(pairs)
+    println("DEBUG: built occ and neighcells for $(length(P)) pairs")
 
     # If no pairs were generated, return early (no model to build)
     if length(P) == 0
@@ -266,9 +274,22 @@ function solve_pentomino(A)
         end
     end
 
-    # Enforce neighbor-touch conflicts using the precomputed conflicts list
-    for (p,q) in conflicts
-        @constraint(model, y[p] + y[q] ≤ 1)
+    # For each pair, build a compact constraint that forbids selecting that pair
+    # together with any pair occupying its neighbor cells. This reduces the number
+    # of constraints compared to enumerating all pairwise conflicts.
+    for pid in 1:length(P)
+        # gather unique neighbor pair indices from occ at the neighbor cells
+        qs = Int[]
+        for nb in neighcells[pid]
+            nx, ny = nb
+            append!(qs, occ[nx, ny])
+        end
+        qs = unique(qs)
+        # remove self and same-letter pairs
+        filter!(q -> q != pid && P[q].t != P[pid].t, qs)
+        if !isempty(qs)
+            @constraint(model, y[pid] + sum(y[q] for q in qs) ≤ 1)
+        end
     end
 
         @objective(model, Max, sum(P[i].weight * y[i] for i in 1:length(P)))
