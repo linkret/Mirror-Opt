@@ -1,6 +1,5 @@
 using JuMP
-using HiGHS  # or GLPK, Cbc, Gurobi
-import MathOptInterface as MOI
+using HiGHS  # or GLPK, Cbc, Gurobi, CPLEX
 
 if !isdefined(Main, :CONSTANTS_INCLUDED)
     include("Constants.jl")
@@ -23,7 +22,8 @@ end
 
 # Generate all unique rotations of a base shape (uppercase side, no mirror)
 function generate_rotations(base)
-    seen = Set{NTuple{5,Tuple{Int,Int}}}()
+    # seen keys are tuples of variable length (one entry per cell)
+    seen = Set{Tuple{Vararg{Tuple{Int,Int}}}}()
     outs = Vector{Vector{Tuple{Int,Int}}}()
     for k in 0:3
         cells = [rot(c,k) for c in base]
@@ -85,8 +85,9 @@ function enumerate_uppercase_placements()
             # bounding to keep in the grid (rshape is normalized to min x/y = 0)
             xs = (x for (x,_) in rshape); ys = (y for (_,y) in rshape)
             maxx, maxy = maximum(xs), maximum(ys)
-            for ax in 1:(W - maxx)
-                for ay in 1:(H - maxy)
+            # Only allow original anchor points (even coordinates) to avoid starting on padded cells
+            for ax in 1:2:(W - maxx)
+                for ay in 1:2:(H - maxy)
                     placed = translate(rshape, ax, ay)  # 1-based grid coords
                     # in-bounds check is redundant given bounds, but keep it safe
                     if all(in_bounds, placed)
@@ -107,8 +108,9 @@ function build_pairs(A, ups)
     #   cellsU::Vector{Tuple{Int,Int}}, cellsL::Vector{Tuple{Int,Int}}, weight::Int
     pairs = Dict{Symbol, Vector{NamedTuple}}()
     for t in LETTERS
-        plist = NamedTuple[]
-        seen = Set{Tuple{NTuple{5,Tuple{Int,Int}},NTuple{5,Tuple{Int,Int}}}}()
+    plist = NamedTuple[]
+    # seen keys: pair of variable-length tuples for cu and cl (supports expanded shapes)
+    seen = Set{Tuple{Tuple{Vararg{Tuple{Int,Int}}}, Tuple{Vararg{Tuple{Int,Int}}}}}()
         for U in ups[t]
             for e in external_edges(U)
                 L = reflect_across_edge(U, e)
@@ -126,9 +128,9 @@ function build_pairs(A, ups)
                         wL = sum(A[y, x] for (x,y) in cl)
                         total_sum = wU - wL
                         # Just a heuristic, risks unoptimality, skipping negative placements
-                        # if total_sum >= 0 
-                        push!(plist, (cellsU = cu, cellsL = cl, weight = total_sum))
-                        #end
+                        if total_sum >= 0 # TODO: try without 
+                            push!(plist, (cellsU = cu, cellsL = cl, weight = total_sum))
+                        end
                     end
                 end
             end
@@ -199,7 +201,7 @@ function solve_pentomino(A)
     chosen = Int[]
     try
         model = Model(HiGHS.Optimizer)  # or GLPK.Optimizer / Cbc.Optimizer / Gurobi.Optimizer
-        #set_optimizer_attribute(model, "time_limit", 600.0)  # 10-minute time limit
+        set_optimizer_attribute(model, "time_limit", 1800.0)  # 30-minute time limit
         #set_silent(model)
 
         @variable(model, y[1:length(P)], Bin)
@@ -267,9 +269,18 @@ function run()
                 grid[y,x] = low
             end
         end
-        println("solution grid:")
-        for y in 1:H
-            println(join(grid[y,:]))
+        # Print a reduced grid sampling the top-left cell of each 2x2 block
+        reduced_h = div(H, 2)
+        reduced_w = div(W, 2)
+        println("solution grid (reduced):")
+        for ry in 1:reduced_h
+            rowchars = Vector{Char}(undef, reduced_w)
+            for rx in 1:reduced_w
+                srcx = 2*(rx-1) + 1
+                srcy = 2*(ry-1) + 1
+                rowchars[rx] = grid[srcy, srcx]
+            end
+            println(join(rowchars))
         end
     end
 end
