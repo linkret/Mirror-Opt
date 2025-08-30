@@ -21,6 +21,47 @@ const _POINT_VALUE_MATRIX_ORIG = [
     7 5 9 3 6 9 8 2 7 4 6 2 8 5 8 1
 ]
 
+const EXAMPLE_SOLUTION_16 = [
+    "N..n.LLLL.p..P..",
+    "NNnn....L.ppPP..",
+    ".Nn.....l.ppPP..",
+    ".Nn..llll......W",
+    "..........f...WW",
+    "yyyy.U.U.ff..WW.",
+    "..y..UUU..ff.ww.",
+    "..Y..uuu..FF..ww",
+    "YYYY.u.u.FF....w",
+    "..........F.vV..",
+    ".X..iiiii...vV..",
+    "XXX.IIIII.vvvVVV",
+    ".X..............",
+    ".x...ZZzz.tttTTT",
+    "xxx..Z..z..t..T.",
+    ".x..ZZ..zz.t..T."
+]
+
+# Build a 32x32 Char matrix by duplicating each character into a 2x2 block
+const EXAMPLE_SOLUTION = begin
+    rows16 = EXAMPLE_SOLUTION_16
+    mat = Array{Char}(undef, 32, 32)
+    for i in 1:16
+        s = collect(rows16[i])
+        # expand horizontally: each char twice
+        outrow = Char[]
+        for c in s
+            push!(outrow, c)
+            push!(outrow, c)
+        end
+        r1 = 2*i - 1
+        r2 = 2*i
+        for j in 1:32
+            mat[r1, j] = outrow[j]
+            mat[r2, j] = outrow[j]
+        end
+    end
+    mat
+end
+
 const POINT_VALUE_MATRIX = begin
     m = zeros(Int, N, N)
     h0, w0 = size(_POINT_VALUE_MATRIX_ORIG)

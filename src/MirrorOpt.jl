@@ -127,9 +127,14 @@ function build_pairs(A, ups)
                         wU = sum(A[y, x] for (x,y) in cu)
                         wL = sum(A[y, x] for (x,y) in cl)
                         total_sum = wU - wL
-                        # Just a heuristic, risks unoptimality, skipping negative placements
-                        if total_sum >= 0 # TODO: try without 
-                            push!(plist, (cellsU = cu, cellsL = cl, weight = total_sum))
+                        # Check against example solution to mark warm-start pair
+                        upch = first(String(t))
+                        loch = lowercase(string(upch))[1]
+                        matches_example = all(EXAMPLE_SOLUTION[y, x] == upch for (x,y) in cu) &&
+                                          all(EXAMPLE_SOLUTION[y, x] == loch for (x,y) in cl)
+                        # Heuristic speed-up: skip negative placements
+                        if total_sum >= 0
+                            push!(plist, (cellsU = cu, cellsL = cl, weight = total_sum, is_ws = matches_example))
                         end
                     end
                 end
@@ -145,6 +150,7 @@ function build_conflicts(pairs)
     # Flatten to indexable list
     index = Dict{Symbol, Vector{Int}}()
     P = Vector{NamedTuple}()  # each element has fields: t, cells, cellsU, cellsL, weight
+    WS = Int[]  # flattened y indices that match the example solution
     for t in LETTERS
         index[t] = Int[]
         for pr in pairs[t]
@@ -152,6 +158,9 @@ function build_conflicts(pairs)
             cellsAll = union(Set(pr.cellsU), Set(pr.cellsL)) |> collect
             # store both the combined cells and the original U/L partitions
             push!(P, (t=t, cells=cellsAll, cellsU = pr.cellsU, cellsL = pr.cellsL, weight=pr.weight))
+            if hasproperty(pr, :is_ws) && pr.is_ws
+                push!(WS, length(P))
+            end
         end
     end
 
@@ -227,7 +236,7 @@ function build_conflicts(pairs)
         end
     end
 
-    return P, index, occ, neighcells
+    return P, index, occ, neighcells, WS
 end
 
 # Build and solve the MILP
@@ -235,7 +244,7 @@ function solve_pentomino(A)
     ups   = enumerate_uppercase_placements()
     pairs = build_pairs(A, ups)
     println("DEBUG: built $(sum(length(pairs[t]) for t in LETTERS)) pairs")
-    P, index, occ, neighcells = build_conflicts(pairs)
+    P, index, occ, neighcells, WS = build_conflicts(pairs)
     println("DEBUG: built occ and neighcells for $(length(P)) pairs")
 
     # If no pairs were generated, return early (no model to build)
@@ -250,8 +259,8 @@ function solve_pentomino(A)
     chosen = Int[]
     try
         model = Model(HiGHS.Optimizer)  # or GLPK.Optimizer / Cbc.Optimizer / Gurobi.Optimizer
-        #set_optimizer_attribute(model, "time_limit", 1800.0)  # 30-minute time limit
-        #set_silent(model)
+        set_optimizer_attribute(model, "time_limit", 120.0)  # 2-minute time limit
+        # set_silent(model)
 
         @variable(model, y[1:length(P)], Bin)
 
@@ -290,11 +299,22 @@ function solve_pentomino(A)
         # remove self and same-letter pairs
         filter!(q -> q != pid && P[q].t != P[pid].t, qs)
         if !isempty(qs)
-            @constraint(model, y[pid] + sum(y[q] for q in qs) ≤ 1)
+            @constraint(model, 12 * y[pid] + sum(y[q] for q in qs) ≤ 12)
         end
     end
 
         @objective(model, Max, sum(P[i].weight * y[i] for i in 1:length(P)))
+
+        # Warm start using pairs that exactly match EXAMPLE_SOLUTION
+        if !isempty(WS)
+            for i in 1:length(P)
+                set_start_value(y[i], 0)
+            end
+            for pid in WS
+                set_start_value(y[pid], 1)
+            end
+            println("Warm start with ", length(WS), " letters; nominal score = ", sum(P[i].weight for i in WS))
+        end
 
         optimize!(model)
 
