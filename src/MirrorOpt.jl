@@ -144,7 +144,7 @@ end
 function build_conflicts(pairs)
     # Flatten to indexable list
     index = Dict{Symbol, Vector{Int}}()
-    P = Vector{NamedTuple}()  # each element has fields: t, cells, weight
+    P = Vector{NamedTuple}()  # each element has fields: t, cells, cellsU, cellsL, weight
     for t in LETTERS
         index[t] = Int[]
         for pr in pairs[t]
@@ -156,30 +156,78 @@ function build_conflicts(pairs)
     end
 
     # Build an W x H matrix where each cell contains the list of pair indices
-    # that would occupy that cell or any of its 8-neighbors (used for cell-wise <=1 constraints)
-    occ8 = [Int[] for x in 1:W, y in 1:H]
+    # that occupy that cell (NO neighbor expansion here)
+    occ = [Int[] for x in 1:W, y in 1:H]
 
-    # helper for 8-neighborhood including the cell itself
-    function neighborhood8((x,y))
-        ((x,y),
-         (x-1,y-1),(x,y-1),(x+1,y-1),
+    # helper for 8-neighborhood excluding the cell itself
+    function neighbors8((x,y))
+        ((x-1,y-1),(x,y-1),(x+1,y-1),
          (x-1,y),(x+1,y),
          (x-1,y+1),(x,y+1),(x+1,y+1))
     end
 
+    # populate occ with pair indices for the cells they actually occupy
     for (pid, pr) in enumerate(P)
-        # For each cell touched by the pair, add pid to that cell and its neighbors
         for c in pr.cells
-            for nb in neighborhood8(c)
+            if in_bounds(c)
+                nx, ny = c
+                push!(occ[nx, ny], pid)
+            end
+        end
+    end
+
+    # build conflicts set: overlaps (same cell) and neighbor touches
+    conflicts = Set{Tuple{Int,Int}}()
+
+    # overlaps: any two different-letter pairs sharing a cell
+    for x in 1:W, y in 1:H
+        lst = occ[x,y]
+        for i in 1:length(lst), j in (i+1):length(lst)
+            p, q = lst[i], lst[j]
+            if P[p].t != P[q].t
+                push!(conflicts, (min(p,q), max(p,q)))
+            end
+        end
+    end
+
+    # neighbor touches: for each pair, look at neighbors of its occupied cells and conflict with pairs occupying those neighbor cells
+    println("DEBUG: checking neighbor touches")
+
+    # prepare per-pair neighbor-cell lists (this is what the caller expects)
+    neighcells = [Vector{Tuple{Int,Int}}() for _ in 1:length(P)]
+
+    for (pid, pr) in enumerate(P)
+        # compute the outer-edge neighbor cells of the whole shape (unique)
+        neighs = Set{Tuple{Int,Int}}()
+        for c in pr.cells
+            for nb in neighbors8(c)
                 if in_bounds(nb)
-                    nx, ny = nb
-                    push!(occ8[nx, ny], pid)
+                    push!(neighs, nb)
+                end
+            end
+        end
+        # remove cells that are actually occupied by the pair to get the "outer edge"
+        for c in pr.cells
+            if c in neighs
+                delete!(neighs, c)
+            end
+        end
+
+        # record neighbor cells for this pair (caller uses this)
+        neighcells[pid] = collect(neighs)
+
+        # iterate outer neighbors (unique) once and add conflicts with pairs occupying them
+        for nb in neighs
+            nx, ny = nb
+            for q in occ[nx, ny]
+                if pid < q && P[pid].t != P[q].t
+                    push!(conflicts, (pid, q))
                 end
             end
         end
     end
 
-    return P, index, occ8
+    return P, index, occ, neighcells
 end
 
 # Build and solve the MILP
@@ -187,7 +235,8 @@ function solve_pentomino(A)
     ups   = enumerate_uppercase_placements()
     pairs = build_pairs(A, ups)
     println("DEBUG: built $(sum(length(pairs[t]) for t in LETTERS)) pairs")
-    P, index, occ8 = build_conflicts(pairs)
+    P, index, occ, neighcells = build_conflicts(pairs)
+    println("DEBUG: built occ and neighcells for $(length(P)) pairs")
 
     # If no pairs were generated, return early (no model to build)
     if length(P) == 0
@@ -206,11 +255,10 @@ function solve_pentomino(A)
 
         @variable(model, y[1:length(P)], Bin)
 
-    # at most one pair per letter (allow skipping letters for speed/score)
+    # at most one pair per letter (disallow any skipping)
     for t in LETTERS
         ids = index[t]
         if !isempty(ids)
-            #@constraint(model, sum(y[i] for i in ids) <= 1)
             @constraint(model, sum(y[i] for i in ids) == 1)
         end
     end
@@ -219,12 +267,30 @@ function solve_pentomino(A)
     # (Optional) Build cell-wise cap tightening:
     # ...
 
-    # Enforce non-overlap / non-touching by cell-wise constraints using occ8
+    # Enforce non-overlap by cell-wise constraints using occ (only occupied cells)
     # Deduplicate indices per cell, avoid shadowing JuMP variable `y` by using xi, yi.
     for xi in 1:W, yi in 1:H
-        ids = unique(occ8[xi, yi])
+        ids = unique(occ[xi, yi])
         if length(ids) > 1
             @constraint(model, sum(y[i] for i in ids) ≤ 1)
+        end
+    end
+
+    # For each pair, build a compact constraint that forbids selecting that pair
+    # together with any pair occupying its neighbor cells. This reduces the number
+    # of constraints compared to enumerating all pairwise conflicts.
+    for pid in 1:length(P)
+        # gather unique neighbor pair indices from occ at the neighbor cells
+        qs = Int[]
+        for nb in neighcells[pid]
+            nx, ny = nb
+            append!(qs, occ[nx, ny])
+        end
+        qs = unique(qs)
+        # remove self and same-letter pairs
+        filter!(q -> q != pid && P[q].t != P[pid].t, qs)
+        if !isempty(qs)
+            @constraint(model, y[pid] + sum(y[q] for q in qs) ≤ 1)
         end
     end
 
