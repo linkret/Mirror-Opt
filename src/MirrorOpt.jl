@@ -201,7 +201,7 @@ function solve_pentomino(A)
     chosen = Int[]
     try
         model = Model(HiGHS.Optimizer)  # or GLPK.Optimizer / Cbc.Optimizer / Gurobi.Optimizer
-        set_optimizer_attribute(model, "time_limit", 1800.0)  # 30-minute time limit
+        #set_optimizer_attribute(model, "time_limit", 1800.0)  # 30-minute time limit
         #set_silent(model)
 
         @variable(model, y[1:length(P)], Bin)
