@@ -101,6 +101,13 @@ function enumerate_uppercase_placements()
     ups
 end
 
+# helper for 8-neighborhood excluding the cell itself
+function neighbors8((x,y))
+    ((x-1,y-1),(x,y-1),(x+1,y-1),
+        (x-1,y),(x+1,y),
+        (x-1,y+1),(x,y+1),(x+1,y+1))
+end
+
 # Build all valid mirrored-and-touching pairs for each letter
 function build_pairs(A, ups)
     # Return:
@@ -133,7 +140,7 @@ function build_pairs(A, ups)
                         matches_example = all(EXAMPLE_SOLUTION[y, x] == upch for (x,y) in cu) &&
                                           all(EXAMPLE_SOLUTION[y, x] == loch for (x,y) in cl)
                         # Heuristic speed-up: skip negative placements
-                        if total_sum >= 0
+                        if total_sum >= 4
                             push!(plist, (cellsU = cu, cellsL = cl, weight = total_sum, is_ws = matches_example))
                         end
                     end
@@ -167,13 +174,6 @@ function build_conflicts(pairs)
     # Build an W x H matrix where each cell contains the list of pair indices
     # that occupy that cell (NO neighbor expansion here)
     occ = [Int[] for x in 1:W, y in 1:H]
-
-    # helper for 8-neighborhood excluding the cell itself
-    function neighbors8((x,y))
-        ((x-1,y-1),(x,y-1),(x+1,y-1),
-         (x-1,y),(x+1,y),
-         (x-1,y+1),(x,y+1),(x+1,y+1))
-    end
 
     # populate occ with pair indices for the cells they actually occupy
     for (pid, pr) in enumerate(P)
@@ -259,7 +259,7 @@ function solve_pentomino(A)
     chosen = Int[]
     try
         model = Model(HiGHS.Optimizer)  # or GLPK.Optimizer / Cbc.Optimizer / Gurobi.Optimizer
-        set_optimizer_attribute(model, "time_limit", 120.0)  # 2-minute time limit
+        # set_optimizer_attribute(model, "time_limit", 120.0)  # 2-minute time limit
         # set_silent(model)
 
         @variable(model, y[1:length(P)], Bin)
@@ -271,6 +271,24 @@ function solve_pentomino(A)
             @constraint(model, sum(y[i] for i in ids) == 1)
         end
     end
+
+    for xi in 2:2:W-1, yi in 2:2:H-1
+        clique = Int[]
+        # include pairs that occupy this cell
+        append!(clique, occ[xi, yi])
+        # include pairs that occupy any neighbor cell
+        for (nx,ny) in neighbors8((xi,yi))
+            if 1 ≤ nx ≤ W && 1 ≤ ny ≤ H
+                append!(clique, occ[nx, ny])
+            end
+        end
+        clique = unique(clique)
+        # remove same-letter duplicates? Not needed; ≤1 already enforces across all letters.
+        if length(clique) > 1
+            @constraint(model, sum(y[i] for i in clique) ≤ 1)
+        end
+    end
+
     # no overlap is already implied by the conflicts set built from overlap;
     # but adding cell-wise ≤1 can strengthen. Build once:
     # (Optional) Build cell-wise cap tightening:
@@ -298,8 +316,9 @@ function solve_pentomino(A)
         qs = unique(qs)
         # remove self and same-letter pairs
         filter!(q -> q != pid && P[q].t != P[pid].t, qs)
+        M = min(6, length(qs)) # 6 "should" be 12, but let's be real ain't nobody putting 12 Pentaminoes that close together
         if !isempty(qs)
-            @constraint(model, 12 * y[pid] + sum(y[q] for q in qs) ≤ 12)
+            @constraint(model, sum(y[q] for q in qs) ≤ M * (1 - y[pid]))
         end
     end
 
