@@ -444,7 +444,7 @@ function pick_greedy!(k::Int, pairs::Dict{Symbol, Vector{NamedTuple}})
 
     is_edge_ok = function (t::Symbol, pr)
         # For letter I, require at least one cell on the matrix edge; else reject for greedy
-        #return true # TODO: try both versions
+        return true # TODO: try both versions
         #if t != :I
         #    return true
         #end
@@ -552,7 +552,7 @@ function solve_pentomino(A)
     ups   = enumerate_uppercase_placements()
     pairs = build_pairs(A, ups)
 
-    picked = pick_greedy!(2, pairs)
+    picked = pick_greedy!(3, pairs)
 
     println("DEBUG: built $(sum(length(pairs[t]) for t in LETTERS)) pairs")
     P, index, occ, neighcells, WS = build_conflicts(pairs)
@@ -562,8 +562,6 @@ function solve_pentomino(A)
     for idx in picked
         println("Index: $idx, Letter: ", P[idx].t)
     end
-
-    # picked = [246, 1096]
 
     # Sanity and preview: show greedy picks before building the model
     @assert all(p -> 1 ≤ p ≤ length(P), picked) "pick_greedy! returned out-of-range indices"
@@ -610,30 +608,31 @@ function solve_pentomino(A)
 
     # Enforce non-overlap by cell-wise constraints using occ (only occupied cells)
     # Deduplicate indices per cell, avoid shadowing JuMP variable `y` by using xi, yi.
-    for xi in 1:W, yi in 1:H
-        ids = unique(occ[xi, yi])
-        if length(ids) > 1
-            @constraint(model, sum(y[i] for i in ids) ≤ 1)
-        end
-    end
+    # for xi in 1:W, yi in 1:H
+    #     ids = unique(occ[xi, yi])
+    #     if length(ids) > 1
+    #         @constraint(model, sum(y[i] for i in ids) ≤ 1)
+    #     end
+    # end
 
     # Grouped neighborhood constraints for every other cell (2,2), (2,4), ...
     # For each grid cell (i,j) with step 2, gather occ[] indices from the
     # 3x3 neighborhood centered at (i,j) and require at most one selected pair
     # among all pairs occupying those neighbor cells.
-    # for i in 2:2:W-1, j in 2:2:H-1
-    #     ids = Int[]
-    #     for dx in -1:1, dy in -1:1
-    #         nx, ny = i + dx, j + dy
-    #         if 1 ≤ nx ≤ W && 1 ≤ ny ≤ H
-    #             append!(ids, occ[nx, ny])
-    #         end
-    #     end
-    #     ids = unique(ids)
-    #     if !isempty(ids)
-    #         @constraint(model, sum(y[k] for k in ids) ≤ 1)
-    #     end
-    # end
+    
+    for i in 2:2:W-1, j in 2:2:H-1
+        ids = Int[]
+        for dx in -1:1, dy in -1:1
+            nx, ny = i + dx, j + dy
+            if 1 ≤ nx ≤ W && 1 ≤ ny ≤ H
+                append!(ids, occ[nx, ny])
+            end
+        end
+        ids = unique(ids)
+        if !isempty(ids)
+            @constraint(model, sum(y[k] for k in ids) ≤ 1)
+        end
+    end
 
     # For each pair, build a compact constraint that forbids selecting that pair
     # together with any pair occupying its neighbor cells. This reduces the number
@@ -648,7 +647,7 @@ function solve_pentomino(A)
         qs = unique(qs)
         # remove self and same-letter pairs
         filter!(q -> q != pid && P[q].t != P[pid].t, qs)
-        M = min(6, length(qs)) # 6 "should" be 12, but let's be real ain't nobody putting 12 Pentaminoes that close together
+        M = min(12, length(qs)) # 6 "should" be 12, but let's be real ain't nobody putting 12 Pentaminoes that close together
         if !isempty(qs)
             @constraint(model, sum(y[q] for q in qs) ≤ M * (1 - y[pid]))
         end
@@ -657,15 +656,15 @@ function solve_pentomino(A)
         @objective(model, Max, sum(P[i].weight * y[i] for i in 1:length(P)))
 
         # Warm start using pairs that exactly match EXAMPLE_SOLUTION
-        if !isempty(WS)
-            for i in 1:length(P)
-                set_start_value(y[i], 0)
-            end
-            for pid in WS
-                set_start_value(y[pid], 1)
-            end
-            println("Warm start with ", length(WS), " letters; nominal score = ", sum(P[i].weight for i in WS))
-        end
+        # if !isempty(WS)
+        #     for i in 1:length(P)
+        #         set_start_value(y[i], 0)
+        #     end
+        #     for pid in WS
+        #         set_start_value(y[pid], 1)
+        #     end
+        #     println("Warm start with ", length(WS), " letters; nominal score = ", sum(P[i].weight for i in WS))
+        # end
 
         optimize!(model)
 

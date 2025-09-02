@@ -22,22 +22,22 @@ const _POINT_VALUE_MATRIX_ORIG = [
 ]
 
 const EXAMPLE_SOLUTION_16 = [
-    "iiiiiIIIII.v.T..";
-    "...........v.TTT";
-    "PP..ZZ...vvv.T..";
-    "PP..Z....VVV.t..";
-    "P..ZZ......V.ttt";
-    "p..zz.llLL.V.t..";
-    "pp..z..lL......n";
-    "pp..zz.lL.U.U..n";
-    ".......lL.UUU.nn";
-    ".x..X.....uuu.n.";
-    "xxxXXX.F..u.u.N.";
-    ".x..X..FF.....NN";
-    "......FF...yY..N";
-    "..wW..ff..yyYY.N";
-    ".wwWW..ff..yY...";
-    "ww..WW.f...yY..."
+    "iiiiiIIIII..vV..";
+    "............vV..";
+    "PP.U.Uu.u.vvvVVV";
+    "PP.UUUuuu.......";
+    "P.........w..ZZ.";
+    "p...f..F..ww..Z.";
+    "pp.fffFFF..ww.ZZ";
+    "pp.f....F..WW.zz";
+    ".....tT...WW..z.";
+    "...tttTTT.W..zz.";
+    ".X...tT.........";
+    "XXX.....LLll....";
+    ".X....y..Ll..Nn.";
+    ".x..yyyy.Ll.NNnn";
+    "xxx.YYYY.Ll.N..n";
+    ".x....Y.....N..n"
 ]
 
 # Build a 32x32 Char matrix by duplicating each character into a 2x2 block
