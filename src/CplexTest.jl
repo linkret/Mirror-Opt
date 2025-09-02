@@ -240,7 +240,7 @@ function build_conflicts(pairs)
 end
 
 # Build and solve the MILP
-function solve_pentomino(A)
+function solve_pentomino(A, run::Bool = false)
     ups   = enumerate_uppercase_placements()
     pairs = build_pairs(A, ups)
     println("DEBUG: built $(sum(length(pairs[t]) for t in LETTERS)) pairs")
@@ -258,20 +258,28 @@ function solve_pentomino(A)
     obj = NaN
     chosen = Int[]
     try
-        # --- Also generate AMPL .mod and .dat files ---
-        # Build pairwise conflicts set from occ/neighcells
+        # --- Build pairwise conflicts from 3x3 pools and neighbor cells ---
         conflicts = Set{Tuple{Int,Int}}()
-        # Overlaps
-        for x in 1:W, y in 1:H
-            ids = occ[x,y]
-            for i in 1:length(ids), j in (i+1):length(ids)
-                p, q = ids[i], ids[j]
-                if P[p].t != P[q].t
-                    push!(conflicts, (min(p,q), max(p,q)))
+        # 3x3 pools centered on even-even cells
+        for xi in 2:2:W-1, yi in 2:2:H-1
+            pool = Int[]
+            append!(pool, occ[xi, yi])
+            for (nx,ny) in neighbors8((xi,yi))
+                if 1 ≤ nx ≤ W && 1 ≤ ny ≤ H
+                    append!(pool, occ[nx, ny])
+                end
+            end
+            pool = unique(pool)
+            if length(pool) > 1
+                for i in 1:length(pool), j in (i+1):length(pool)
+                    p = pool[i]; q = pool[j]
+                    if P[p].t != P[q].t
+                        push!(conflicts, (min(p,q), max(p,q)))
+                    end
                 end
             end
         end
-        # 8-neighbor touches
+        # Neighbor-touch pairs (small-M neighbors flattened to pairwise)
         for pid in 1:length(P)
             qs = Int[]
             for nb in neighcells[pid]
@@ -279,38 +287,36 @@ function solve_pentomino(A)
                 append!(qs, occ[nx, ny])
             end
             qs = unique(qs)
+            filter!(q -> q != pid && P[q].t != P[pid].t, qs)
             for q in qs
-                if pid < q && P[pid].t != P[q].t
-                    push!(conflicts, (pid, q))
-                end
+                push!(conflicts, (min(pid,q), max(pid,q)))
             end
         end
 
-    # Write AMPL model (.mod) and data (.dat)
+        # --- Write AMPL model (.mod) and data (.dat) using the new structure ---
         out_dir = normpath(joinpath(@__DIR__, ".."))
         mod_path = joinpath(out_dir, "pentomino.mod")
         dat_path = joinpath(out_dir, "pentomino.dat")
 
         open(mod_path, "w") do io
-            println(io, "# Pentomino MILP (auto-generated)\n")
+            println(io, "# Pentomino MILP (auto-generated; pairwise no-touch)\n")
             println(io, "set LETTERS;")
             println(io, "set Pairs;")
-            println(io, "set PairsByLetter {l in LETTERS} within Pairs;")
-            println(io, "set Conflicts within Pairs cross Pairs;")
-            println(io, "set WarmStart within Pairs;  # optional, for MIP starts\n")
+            println(io, "set PairsByLetter {l in LETTERS} within Pairs;\n")
+            println(io, "set Conflicts within {i in Pairs, j in Pairs: i < j};")
+            println(io, "set WarmStart within Pairs default {};\n")
             println(io, "param w {Pairs};\n")
             println(io, "var y {Pairs} binary;\n")
             println(io, "s.t. OnePerLetter {l in LETTERS}: sum {p in PairsByLetter[l]} y[p] = 1;")
-            println(io, "s.t. NoConflict {(i,j) in Conflicts}: y[i] + y[j] <= 1;\n")
+            println(io, "s.t. NoTwo {(i,j) in Conflicts}: y[i] + y[j] <= 1;\n")
             println(io, "maximize OBJ: sum {p in Pairs} w[p] * y[p];\n")
-            println(io, "# Use WarmStart in a .run script, e.g.:\n# let {p in Pairs} y[p] := if p in WarmStart then 1 else 0;\n")
         end
 
         open(dat_path, "w") do io
-            # Ensure AMPL treats this file as a data section
             println(io, "data;")
             println(io)
-            # Letters (quote to be unambiguous in AMPL)
+
+            # Letters
             print(io, "set LETTERS :=")
             for t in LETTERS
                 print(io, " '", String(t), "'")
@@ -319,7 +325,7 @@ function solve_pentomino(A)
             println(io)
 
             # Pairs
-            println(io, "set Pairs := ")
+            println(io, "set Pairs :=")
             for p in 1:length(P)
                 print(io, p, (p % 20 == 0 ? "\n" : " "))
             end
@@ -344,13 +350,13 @@ function solve_pentomino(A)
             println(io, ";")
             println(io)
 
-            # Conflicts
+            # Pairwise conflicts
             println(io, "set Conflicts :=")
-            ccount = 0
+            ct = 0
             for (i,j) in sort(collect(conflicts))
                 print(io, " (", i, ", ", j, ")")
-                ccount += 1
-                if ccount % 10 == 0
+                ct += 1
+                if ct % 12 == 0
                     println(io)
                 else
                     print(io, " ")
@@ -359,16 +365,19 @@ function solve_pentomino(A)
             println(io, ";")
             println(io)
 
-            # Warm start set
-            println(io, "set WarmStart :=")
+            # No RowCuts/NeighPairs/M in pairwise format
+
+            # Warm start indices
+            print(io, "set WarmStart :=")
             for (k,p) in enumerate(WS)
-                print(io, p, (k % 20 == 0 ? "\n" : " "))
+                print(io, " ", p)
+                if k % 30 == 0; print(io, "\n"); end
             end
             println(io, ";")
             println(io)
         end
-        println("Exported AMPL files:\n  MOD: ", mod_path, "\n  DAT: ", dat_path)
 
+    println("Exported AMPL files (pairwise):\n  MOD: ", mod_path, "\n  DAT: ", dat_path)
         # Continue to create a JuMP model and export LP/MPS as before
         model = Model(CPLEX.Optimizer)  # or GLPK.Optimizer / HiGHS.Optimizer / Cbc.Optimizer / Gurobi.Optimizer
         
@@ -380,7 +389,7 @@ function solve_pentomino(A)
         set_optimizer_attribute(model, "CPX_PARAM_MIPEMPHASIS", 2)
         # Optional logging level (0=off, 1=milestones, 2=moderate)
         set_optimizer_attribute(model, "CPX_PARAM_MIPDISPLAY", 2)
-
+        
         @variable(model, y[1:length(P)], Bin)
         # Assign stable, LP/MPS-safe variable names (y_1, y_2, ...)
         for i in 1:length(P)
@@ -395,21 +404,9 @@ function solve_pentomino(A)
         end
     end
 
-    for xi in 2:2:W-1, yi in 2:2:H-1
-        clique = Int[]
-        # include pairs that occupy this cell
-        append!(clique, occ[xi, yi])
-        # include pairs that occupy any neighbor cell
-        for (nx,ny) in neighbors8((xi,yi))
-            if 1 ≤ nx ≤ W && 1 ≤ ny ≤ H
-                append!(clique, occ[nx, ny])
-            end
-        end
-        clique = unique(clique)
-        # remove same-letter duplicates? Not needed; ≤1 already enforces across all letters.
-        if length(clique) > 1
-            @constraint(model, sum(y[i] for i in clique) ≤ 1)
-        end
+    # Pairwise constraints
+    for (i,j) in conflicts
+        @constraint(model, y[i] + y[j] ≤ 1)
     end
 
     # no overlap is already implied by the conflicts set built from overlap;
@@ -417,33 +414,12 @@ function solve_pentomino(A)
     # (Optional) Build cell-wise cap tightening:
     # ...
 
-    # Enforce non-overlap by cell-wise constraints using occ (only occupied cells)
-    # Deduplicate indices per cell, avoid shadowing JuMP variable `y` by using xi, yi.
-    for xi in 1:W, yi in 1:H
-        ids = unique(occ[xi, yi])
-        if length(ids) > 1
-            @constraint(model, sum(y[i] for i in ids) ≤ 1)
-        end
-    end
+    # No per-cell or small-M constraints; covered by pairwise Conflicts
 
     # For each pair, build a compact constraint that forbids selecting that pair
     # together with any pair occupying its neighbor cells. This reduces the number
     # of constraints compared to enumerating all pairwise conflicts.
-    for pid in 1:length(P)
-        # gather unique neighbor pair indices from occ at the neighbor cells
-        qs = Int[]
-        for nb in neighcells[pid]
-            nx, ny = nb
-            append!(qs, occ[nx, ny])
-        end
-        qs = unique(qs)
-        # remove self and same-letter pairs
-        filter!(q -> q != pid && P[q].t != P[pid].t, qs)
-        M = min(6, length(qs)) # 6 "should" be 12, but let's be real ain't nobody putting 12 Pentaminoes that close together
-        if !isempty(qs)
-            @constraint(model, sum(y[q] for q in qs) ≤ M * (1 - y[pid]))
-        end
-    end
+    # (row-cuts removed)
 
         @objective(model, Max, sum(P[i].weight * y[i] for i in 1:length(P)))
 
@@ -459,11 +435,25 @@ function solve_pentomino(A)
         end
 
     # Export LP/MPS to same directory (already defined)
-        lp_path  = joinpath(out_dir, "pentomino_model.lp")
-        mps_path = joinpath(out_dir, "pentomino_model.mps")
-        JuMP.write_to_file(model, lp_path)
-        JuMP.write_to_file(model, mps_path)
-        println("Exported model to:\n  LP : " * lp_path * "\n  MPS: " * mps_path)
+        #lp_path  = joinpath(out_dir, "pentomino_model.lp")
+        #mps_path = joinpath(out_dir, "pentomino_model.mps")
+        #JuMP.write_to_file(model, lp_path)
+        #JuMP.write_to_file(model, mps_path)
+        #println("Exported model to:\n  LP : " * lp_path * "\n  MPS: " * mps_path)
+
+        if (run)
+            optimize!(model)
+
+            status = termination_status(model)
+            # Safely attempt to read objective and variable values; handle cases with no solution
+            try
+                obj    = objective_value(model)
+                chosen = findall(i -> value(y[i]) > 0.5, 1:length(P))
+            catch _err
+                obj = NaN
+                chosen = Int[]
+            end
+        end
 
         status = :EXPORTED
         obj = NaN
@@ -478,9 +468,43 @@ end
 
 # Simple runner when executing this file
 
-function run()
-    status, best, _, _ = solve_pentomino(A)
-    println("status: ", status, " (model written to LP/MPS; not solved)")
+function run(solve::Bool = false)
+    status, best, _, _ = solve_pentomino(A, solve)
+    if solve
+        println("status: ", status)
+        println("objective: ", best)
+        println("selected pairs: ", length(chosen))
+        if !isempty(chosen)
+            grid = fill('.', H, W)
+            for i in chosen
+                # mark uppercase and mirrored (lowercase) cells distinctly
+                up = first(String(P[i].t))
+                low = lowercase(string(up))[1]
+                for (x,y) in P[i].cellsU
+                    grid[y,x] = up
+                end
+                for (x,y) in P[i].cellsL
+                    grid[y,x] = low
+                end
+            end
+            # Print a reduced grid sampling the top-left cell of each 2x2 block
+            reduced_h = div(H, 2)
+            reduced_w = div(W, 2)
+            println("solution grid (reduced):")
+            for ry in 1:reduced_h
+                rowchars = Vector{Char}(undef, reduced_w)
+                for rx in 1:reduced_w
+                    srcx = 2*(rx-1) + 1
+                    srcy = 2*(ry-1) + 1
+                    rowchars[rx] = grid[srcy, srcx]
+                end
+                println(join(rowchars))
+            end
+        end
+
+    else
+        println("status: ", status, " (model written to LP/MPS; not solved)")
+    end
 end
 
 return 0

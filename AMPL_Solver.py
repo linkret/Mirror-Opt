@@ -1,4 +1,5 @@
-from amplpy import AMPL, ampl_notebook
+from amplpy import AMPL, Environment, ampl_notebook
+# from amplpy.modules import cplex
 import os
 
 with open("ampl.lic", "r") as f:
@@ -10,7 +11,7 @@ ampl = ampl_notebook(
     license_uuid=license_string,
 )
 
-# ampl = AMPL() # Local AMPL instance
+#ampl = AMPL() # Local AMPL instance
 
 # ampl.eval("reset;") # Probably not needed
 
@@ -28,7 +29,8 @@ let {p in WarmStart} y[p] := 1;
 
 # Solve with CPLEX
 ampl.setOption("solver", "cplex")
-ampl.setOption("cplex_options", "threads=4 mipdisplay=2") # mipemphasis=1 mipdisplay=2 nodefileind=2
+# ampl.setOption("cplex_options", "threads=4 mipdisplay=2") # mipemphasis=1 mipdisplay=2 nodefileind=2
+ampl.setOption("cplex_options", "mipemphasis=1 mipdisplay=2") # mipemphasis=1 mipdisplay=2 nodefileind=2
 
 ampl.solve()
 
