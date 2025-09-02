@@ -212,6 +212,13 @@ function enumerate_uppercase_placements()
     ups
 end
 
+# helper for 8-neighborhood excluding the cell itself
+function neighbors8((x,y))
+    ((x-1,y-1),(x,y-1),(x+1,y-1),
+        (x-1,y),(x+1,y),
+        (x-1,y+1),(x,y+1),(x+1,y+1))
+end
+
 # Build all valid mirrored-and-touching pairs for each letter
 function build_pairs(A, ups)
     # Return:
@@ -287,13 +294,6 @@ function build_conflicts(pairs)
     # Build an W x H matrix where each cell contains the list of pair indices
     # that occupy that cell (NO neighbor expansion here)
     occ = [Int[] for x in 1:W, y in 1:H]
-
-    # helper for 8-neighborhood excluding the cell itself
-    function neighbors8((x,y))
-        ((x-1,y-1),(x,y-1),(x+1,y-1),
-         (x-1,y),(x+1,y),
-         (x-1,y+1),(x,y+1),(x+1,y+1))
-    end
 
     # populate occ with pair indices for the cells they actually occupy
     for (pid, pr) in enumerate(P)
@@ -648,8 +648,9 @@ function solve_pentomino(A)
         qs = unique(qs)
         # remove self and same-letter pairs
         filter!(q -> q != pid && P[q].t != P[pid].t, qs)
+        M = min(6, length(qs)) # 6 "should" be 12, but let's be real ain't nobody putting 12 Pentaminoes that close together
         if !isempty(qs)
-            @constraint(model, 6 * y[pid] + sum(y[q] for q in qs) ≤ 6)
+            @constraint(model, sum(y[q] for q in qs) ≤ M * (1 - y[pid]))
         end
     end
 
