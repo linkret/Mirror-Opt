@@ -1,5 +1,9 @@
 using JuMP
 using HiGHS  # or GLPK, Cbc, Gurobi, CPLEX
+using Random
+
+# Seed RNG from current time (similar to C++ time(0))
+Random.seed!(UInt64(Base.time_ns()))
 
 if !isdefined(Main, :CONSTANTS_INCLUDED)
     include("Constants.jl")
@@ -151,25 +155,32 @@ function reflect_across_edge(cells::Vector{Tuple{Int,Int}}, edge::Tuple{Tuple{In
     end
 end
 
+# helper for 8-neighborhood excluding the cell itself
+function neighbors8((x,y))
+    ((x-1,y-1),(x,y-1),(x+1,y-1),(x-1,y),(x+1,y),(x-1,y+1),(x,y+1),(x+1,y+1))
+end
+
+function inflate(pr)
+    s = union(pr.cellsU, pr.cellsL)
+    # add neighbors
+    for (x,y) in collect(s)
+        for nb in neighbors8((x,y))
+            if in_bounds(nb)
+                push!(s, nb)
+            end
+        end
+    end
+    return s
+end
+
 # Enumerate all uppercase placements (shape rotations and translations)
 function enumerate_uppercase_placements()
-    # for yy in 1:N
-    #     for xx in 1:N
-    #         print(A[yy, xx], " ")
-    #     end
-    #     println()
-    # end
-    # println()
-
     ups = Dict{Symbol, Vector{Vector{Tuple{Int,Int}}}}()
     for t in LETTERS
         base = SHAPES[t]
         rots = generate_rotations(base)
         placements = Vector{Vector{Tuple{Int,Int}}}()
         for rshape in rots
-            # bounding to keep in the grid (rshape is normalized to min x/y = 0)
-            xs = (x for (x,_) in rshape); ys = (y for (_,y) in rshape)
-            maxx, maxy = maximum(xs), maximum(ys)
             # Only allow original anchor points (even coordinates) to avoid starting on padded cells
             for ax in 1-N:2:N+N
                 for ay in 1-N:2:N+N
@@ -179,29 +190,7 @@ function enumerate_uppercase_placements()
                         continue
                     end
                     
-                    total_sum = sum(A[y, x] for (x,y) in placed)
-
-                    # if t == :W && (26, 16) in placed && (22, 20) in placed 
-                    #     minx = minimum(x for (x,y) in placed)
-                    #     miny = minimum(y for (x,y) in placed)
-                    #     maxx = maximum(x for (x,y) in placed)
-                    #     maxy = maximum(y for (x,y) in placed)
-                        
-                    #     println("DEBUG: index = $(length(placements))")
-                    #     println("DEBUG: placement of W at anchor ($minx,$miny) has total sum $total_sum")
-                    #     println("  placed cells: $placed")
-                        
-                    #     for yy in miny:maxy
-                    #        for xx in minx:maxx
-                    #             if (xx, yy) in placed
-                    #                 print(t, " ")
-                    #             else
-                    #                 print(A[yy, xx], " ")
-                    #             end
-                    #         end
-                    #         println()
-                    #     end
-                    # end
+                    # total_sum = sum(A[y, x] for (x,y) in placed)
 
                     push!(placements, placed)
                 end
@@ -210,13 +199,6 @@ function enumerate_uppercase_placements()
         ups[t] = placements
     end
     ups
-end
-
-# helper for 8-neighborhood excluding the cell itself
-function neighbors8((x,y))
-    ((x-1,y-1),(x,y-1),(x+1,y-1),
-        (x-1,y),(x+1,y),
-        (x-1,y+1),(x,y+1),(x+1,y+1))
 end
 
 # Build all valid mirrored-and-touching pairs for each letter
@@ -250,23 +232,63 @@ function build_pairs(A, ups)
                         loch = lowercase(string(upch))[1]
                         matches_example = all(EXAMPLE_SOLUTION[y, x] == upch for (x,y) in cu) &&
                                           all(EXAMPLE_SOLUTION[y, x] == loch for (x,y) in cl)
+                        minx = minimum(x for (x,y) in cu)
+                        miny = minimum(y for (x,y) in cu)
+                        maxx = maximum(x for (x,y) in cu)
+                        maxy = maximum(y for (x,y) in cu)
                         # Heuristic speed-up: skip negative placements
                         if matches_example || total_sum >= 5
-                            push!(plist, (cellsU = cu, cellsL = cl, weight = total_sum, is_ws = matches_example))
+                            push!(plist, (
+                                cellsU = cu,
+                                cellsL = cl,
+                                weight = total_sum,
+                                is_ws = matches_example,
+                                bbox = (minx, miny, maxx, maxy)
+                            ))
                         end
                     end
                 end
             end
         end
-        # Sort plist by descending weight
+
+        function halve(cells)
+            s = Set{Tuple{Int,Int}}()
+            for (x,y) in cells
+                push!(s, (x÷2,y÷2))
+            end
+            return s
+        end
+
+        plist = sort(plist, by = x -> (x.bbox, -x.weight))
+        inflated = [halve(inflate(p)) for p in plist]
+        # Remove duplicates by inflated shape, keeping only one per bbox, largest Weighted
+
+        keep = trues(length(plist))
+        
+        for ip in eachindex(plist)
+            if !keep[ip]
+                continue
+            end
+            p = plist[ip]
+            for ir in (ip+1):length(plist)
+                r = plist[ir]
+                
+                if !keep[ir]
+                    continue
+                end
+                
+                if p.bbox != r.bbox
+                    break
+                end
+
+                if inflated[ip] == inflated[ir]
+                    keep[ir] = false
+                end
+            end
+        end
+
+        plist = plist[keep]
         plist = sort(plist, by = x -> -x.weight)
-        # if !isempty(plist)
-        #     max_erase = Int(floor(0.5 * length(plist)))
-        #     while max_erase > 0 && plist[end].weight < 5
-        #         pop!(plist)
-        #         max_erase -= 1
-        #     end
-        # end
         pairs[t] = plist
     end
     pairs
@@ -403,21 +425,6 @@ function pick_greedy!(k::Int, pairs::Dict{Symbol, Vector{NamedTuple}})
     blocked = Set{Tuple{Int,Int}}()
     pos = Dict{Symbol, Int}(t => 1 for t in LETTERS)  # retained (not used for scoring now)
 
-    neighbors8((x,y)) = ((x-1,y-1),(x,y-1),(x+1,y-1), (x-1,y),(x+1,y), (x-1,y+1),(x,y+1),(x+1,y+1))
-
-    function inflate(pr)
-        s = union(pr.cellsU, pr.cellsL)
-        # add neighbors
-        for (x,y) in collect(s)
-            for nb in neighbors8((x,y))
-                if in_bounds(nb)
-                    push!(s, nb)
-                end
-            end
-        end
-        return s
-    end
-
     # Weighted "cells taken" cost: occupied cells count as 1; empty neighbor cells count as 1,
     # but if a neighbor is on the outer edge band (first/last two rows/cols), it counts as 2.
     outer_edge((x,y)) = (x == 1 || x == 2 || x == W-1 || x == W || y == 1 || y == 2 || y == H-1 || y == H)
@@ -445,9 +452,6 @@ function pick_greedy!(k::Int, pairs::Dict{Symbol, Vector{NamedTuple}})
     is_edge_ok = function (t::Symbol, pr)
         # For letter I, require at least one cell on the matrix edge; else reject for greedy
         return true # TODO: try both versions
-        #if t != :I
-        #    return true
-        #end
         for (x,y) in union(pr.cellsU, pr.cellsL)
             if x == 1 || x == W || y == 1 || y == H
                 return true
@@ -467,7 +471,7 @@ function pick_greedy!(k::Int, pairs::Dict{Symbol, Vector{NamedTuple}})
                 if cells_taken == 0
                     continue
                 end
-                m = pr.weight / cells_taken
+                m = pr.weight * (0.8 + 0.4 * rand()) / cells_taken
                 if m > best_metric || (m == best_metric && pr.weight > best_weight)
                     best_metric = m
                     best_weight = pr.weight
@@ -491,6 +495,10 @@ function pick_greedy!(k::Int, pairs::Dict{Symbol, Vector{NamedTuple}})
                 continue
             end
             m = pr.weight / taken_cost(pr)
+            #if t == :I
+            #    m *= 10  # TODO: remove, temporary hack
+            #end
+            m *= (0.8 + 0.4 * rand()) # randomization
             if m > best_w
                 best_w = m
                 best_t = t
@@ -548,11 +556,10 @@ function pick_greedy!(k::Int, pairs::Dict{Symbol, Vector{NamedTuple}})
 end
 
 # Build and solve the MILP
-function solve_pentomino(A)
+function solve_pentomino(A, greedy_k, optimize = true)
     ups   = enumerate_uppercase_placements()
     pairs = build_pairs(A, ups)
-
-    picked = pick_greedy!(3, pairs)
+    picked = pick_greedy!(greedy_k, pairs)
 
     println("DEBUG: built $(sum(length(pairs[t]) for t in LETTERS)) pairs")
     P, index, occ, neighcells, WS = build_conflicts(pairs)
@@ -584,6 +591,7 @@ function solve_pentomino(A)
     try
         model = Model(HiGHS.Optimizer)  # or GLPK.Optimizer / Cbc.Optimizer / Gurobi.Optimizer
         # set_optimizer_attribute(model, "time_limit", 120.0)  # 2-minute time limit
+        set_optimizer_attribute(model, "objective_bound", -174.0)
         # set_silent(model)
 
     @variable(model, y[1:length(P)], Bin)
@@ -666,16 +674,19 @@ function solve_pentomino(A)
         #     println("Warm start with ", length(WS), " letters; nominal score = ", sum(P[i].weight for i in WS))
         # end
 
-        optimize!(model)
+        if optimize
+                
+            optimize!(model)
 
-        status = termination_status(model)
-        # Safely attempt to read objective and variable values; handle cases with no solution
-        try
-            obj    = objective_value(model)
-            chosen = findall(i -> value(y[i]) > 0.5, 1:length(P))
-        catch _err
-            obj = NaN
-            chosen = Int[]
+            status = termination_status(model)
+            # Safely attempt to read objective and variable values; handle cases with no solution
+            try
+                obj    = objective_value(model)
+                chosen = findall(i -> value(y[i]) > 0.5, 1:length(P))
+            catch _err
+                obj = NaN
+                chosen = Int[]
+            end
         end
     catch err
         # Log and return a safe failure result instead of throwing
@@ -687,8 +698,8 @@ end
 
 # Simple runner when executing this file
 
-function run()
-    status, best, P, chosen = solve_pentomino(A)
+function run(greedy_k = 0, optimize = true)
+    status, best, P, chosen = solve_pentomino(A, greedy_k, optimize)
     println("status: ", status)
     println("objective: ", best)
     println("selected pairs: ", length(chosen))

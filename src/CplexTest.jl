@@ -19,6 +19,8 @@ function export_ampl(greedy_k::Int; outdir = normpath(joinpath(@__DIR__, "..")),
     # Now pairs is mutated; build flattened structures
     P, index, occ, neighcells, WS = build_conflicts(pairs)
 
+    #picked = [1,683,1165,1744,2844,3248,3570,4155,4350,4361,4477,5340]
+    
     println("DEBUG: picked $(picked)")
     println("Picked pairs and their letters:")
     for idx in picked
