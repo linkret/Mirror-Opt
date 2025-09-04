@@ -3,6 +3,8 @@ using HiGHS  # or GLPK, Cbc, Gurobi, CPLEX
 using Random
 using Printf: @sprintf
 import MathOptInterface as MOI
+using Printf: @sprintf
+import MathOptInterface as MOI
 
 # Seed RNG from current time (similar to C++ time(0))
 Random.seed!(UInt64(Base.time_ns()))
@@ -459,6 +461,9 @@ function pick_greedy!(k::Int, pairs::Dict{Symbol, Vector{NamedTuple}}, randomize
         end
         for (x,y) in union(pr.cellsU, pr.cellsL)
             if x == 1 || x == W || y == 1 || y == H
+                #if t in [:P]
+                #    return false
+                #end
                 #if t in [:P]
                 #    return false
                 #end
