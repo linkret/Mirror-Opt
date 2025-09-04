@@ -1,6 +1,8 @@
 using JuMP
 using HiGHS  # or GLPK, Cbc, Gurobi, CPLEX
 using Random
+using Printf: @sprintf
+import MathOptInterface as MOI
 
 # Seed RNG from current time (similar to C++ time(0))
 Random.seed!(UInt64(Base.time_ns()))
@@ -418,7 +420,7 @@ end
 # Assumes pairs[t] is sorted descending by weight. Mutates `pairs` to prune incompatible pairs and
 # keep at most one (chosen) pair per selected letter. Returns the flattened indices (over the mutated order)
 # of the chosen pairs.
-function pick_greedy!(k::Int, pairs::Dict{Symbol, Vector{NamedTuple}})
+function pick_greedy!(k::Int, pairs::Dict{Symbol, Vector{NamedTuple}}, randomize::Bool)
     chosen_keys = Vector{Tuple{Symbol, Vector{Tuple{Int,Int}}, Vector{Tuple{Int,Int}}}}()
     chosen_letters = Set{Symbol}()
     # blocked contains all cells occupied by chosen pairs AND their 8-neighborhoods
@@ -451,12 +453,20 @@ function pick_greedy!(k::Int, pairs::Dict{Symbol, Vector{NamedTuple}})
 
     is_edge_ok = function (t::Symbol, pr)
         # For letter I, require at least one cell on the matrix edge; else reject for greedy
-        return true # TODO: try both versions
+        if t in [:W]
+            return true # TODO: remove, hack
+        end
         for (x,y) in union(pr.cellsU, pr.cellsL)
             if x == 1 || x == W || y == 1 || y == H
+                #if t in [:P]
+                #    return false
+                #end
                 return true
             end
         end
+        #if t in [:P]
+        #    return true
+        #end
         return false
     end
 
@@ -471,7 +481,10 @@ function pick_greedy!(k::Int, pairs::Dict{Symbol, Vector{NamedTuple}})
                 if cells_taken == 0
                     continue
                 end
-                m = pr.weight * (0.8 + 0.4 * rand()) / cells_taken
+                m = pr.weight / cells_taken
+                if randomize
+                    m *= (0.8 + 0.4 * rand())
+                end
                 if m > best_metric || (m == best_metric && pr.weight > best_weight)
                     best_metric = m
                     best_weight = pr.weight
@@ -495,10 +508,12 @@ function pick_greedy!(k::Int, pairs::Dict{Symbol, Vector{NamedTuple}})
                 continue
             end
             m = pr.weight / taken_cost(pr)
-            #if t == :I
-            #    m *= 10  # TODO: remove, temporary hack
-            #end
-            m *= (0.8 + 0.4 * rand()) # randomization
+            if t in [:W, :U, :I]
+                m *= 2 # TODO: remove, temporary hack
+            end
+            if randomize
+                m *= (0.8 + 0.4 * rand()) # randomization
+            end
             if m > best_w
                 best_w = m
                 best_t = t
@@ -556,10 +571,10 @@ function pick_greedy!(k::Int, pairs::Dict{Symbol, Vector{NamedTuple}})
 end
 
 # Build and solve the MILP
-function solve_pentomino(A, greedy_k, optimize = true)
+function solve_pentomino(A, greedy_k::Int = 0, optimize::Bool = true, randomize::Bool = false)
     ups   = enumerate_uppercase_placements()
     pairs = build_pairs(A, ups)
-    picked = pick_greedy!(greedy_k, pairs)
+    picked = pick_greedy!(greedy_k, pairs, randomize)
 
     println("DEBUG: built $(sum(length(pairs[t]) for t in LETTERS)) pairs")
     P, index, occ, neighcells, WS = build_conflicts(pairs)
@@ -570,18 +585,23 @@ function solve_pentomino(A, greedy_k, optimize = true)
         println("Index: $idx, Letter: ", P[idx].t)
     end
 
+    # If no pairs were generated, return early (no model to build)
+    if length(P) == 0
+        println("WARNING: no candidate pairs; skipping model build")
+        return :NO_PAIRS, NaN, P, Int[]
+    end
+
+    if length(P) > 900 # TODO: comment out with HiGHS
+        println("WARNING: too large number of pairs ($(length(P)));")
+        return :NO_PAIRS, NaN, P, Int[]
+    end
+
     # Sanity and preview: show greedy picks before building the model
     @assert all(p -> 1 ≤ p ≤ length(P), picked) "pick_greedy! returned out-of-range indices"
     if !isempty(picked)
         start_score = sum(P[i].weight for i in picked)
         println("Greedy preview (k=$(length(picked))) — starting sum = ", start_score)
         print_solution_grid(P, picked)
-    end
-
-    # If no pairs were generated, return early (no model to build)
-    if length(P) == 0
-        println("WARNING: no candidate pairs; skipping model build")
-        return :NO_PAIRS, NaN, P, Int[]
     end
 
     # Build and solve model inside try/catch to avoid throwing when solver/setup fails
@@ -591,7 +611,7 @@ function solve_pentomino(A, greedy_k, optimize = true)
     try
         model = Model(HiGHS.Optimizer)  # or GLPK.Optimizer / Cbc.Optimizer / Gurobi.Optimizer
         # set_optimizer_attribute(model, "time_limit", 120.0)  # 2-minute time limit
-        set_optimizer_attribute(model, "objective_bound", -174.0)
+        # set_optimizer_attribute(model, "objective_bound", -174.0)
         # set_silent(model)
 
     @variable(model, y[1:length(P)], Bin)
@@ -698,14 +718,63 @@ end
 
 # Simple runner when executing this file
 
-function run(greedy_k = 0, optimize = true)
-    status, best, P, chosen = solve_pentomino(A, greedy_k, optimize)
-    println("status: ", status)
-    println("objective: ", best)
-    println("selected pairs: ", length(chosen))
-    if !isempty(chosen)
-        println("solution grid (reduced):")
-        print_solution_grid(P, chosen)
+function run(greedy_k::Int = 0, optimize::Bool = true, randomize::Bool = false; verbose::Bool = true)
+    status, best, P, chosen = solve_pentomino(A, greedy_k, optimize, randomize)
+    if verbose
+        println("status: ", status)
+        println("objective: ", best)
+        println("selected pairs: ", length(chosen))
+        if !isempty(chosen)
+            println("solution grid (reduced):")
+            print_solution_grid(P, chosen)
+        end
+    end
+    # success only when the solver proved optimality
+    success = (status == MOI.OPTIMAL)
+    return success, best
+end
+
+# Keep running randomized greedy (k=5) until an optimal solution is proven or max_tries is reached
+function run_many(greedy_k::Int = 5, max_tries::Int = 1000; optimize::Bool = true, randomize::Bool = true, stop_on_success::Bool = true, verbose_runs::Bool = true)
+    total_ns = 0.0
+    successes = 0
+    best = -Inf
+    best_run = 0
+    last_score = NaN
+
+    for attempt in 1:max_tries
+        print("Attempt #$attempt: ")
+        t0 = time_ns()
+        success, score = run(greedy_k, optimize, randomize; verbose = verbose_runs)
+        last_score = score
+        dt_ns = (time_ns() - t0)
+        total_ns += dt_ns
+        avg_ms = (total_ns / attempt) / 1e6
+        dt_ms = dt_ns / 1e6
+        println(@sprintf("%.2f ms | aggregate avg %.2f ms", dt_ms, avg_ms))
+
+        successes += success ? 1 : 0
+        if isfinite(score) && (score > best)
+            best = score
+            best_run = attempt
+        end
+
+        if stop_on_success && success
+            println("Succeeded on attempt #$attempt with score = ", score)
+            println(@sprintf("Aggregate average after %d run(s): %.2f ms", attempt, avg_ms))
+            return true, score, attempt
+        end
+    end
+
+    final_avg_ms = (total_ns / max_tries) / 1e6
+    if stop_on_success
+        println("Did not reach proven optimality in ", max_tries, " attempts")
+        println(@sprintf("Aggregate average after %d run(s): %.2f ms", max_tries, final_avg_ms))
+        return false, last_score, max_tries
+    else
+        println(@sprintf("Summary: avg=%.2f ms over %d runs | successes=%d/%d | best=%s on run %d",
+                         final_avg_ms, max_tries, successes, max_tries, string(best), best_run))
+        return final_avg_ms, successes, best
     end
 end
 
