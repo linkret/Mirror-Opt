@@ -1,8 +1,8 @@
 using JuMP
 using HiGHS  # or GLPK, Cbc, Gurobi, CPLEX
+using CPLEX
 using Random
-using Printf: @sprintf
-import MathOptInterface as MOI
+
 using Printf: @sprintf
 import MathOptInterface as MOI
 
@@ -304,6 +304,7 @@ function build_conflicts(pairs)
     index = Dict{Symbol, Vector{Int}}()
     P = Vector{NamedTuple}()  # each element has fields: t, cells, cellsU, cellsL, weight
     WS = Int[]  # flattened y indices that match the example solution
+    
     for t in LETTERS
         index[t] = Int[]
         for pr in pairs[t]
@@ -332,21 +333,19 @@ function build_conflicts(pairs)
     end
 
     # build conflicts set: overlaps (same cell) and neighbor touches
-    conflicts = Set{Tuple{Int,Int}}()
+    # conflicts = Set{Tuple{Int,Int}}()
+    ## overlaps: any two different-letter pairs sharing a cell
+    # for x in 1:W, y in 1:H
+    #     lst = occ[x,y]
+    #     for i in 1:length(lst), j in (i+1):length(lst)
+    #         p, q = lst[i], lst[j]
+    #         if P[p].t != P[q].t
+    #             push!(conflicts, (min(p,q), max(p,q)))
+    #         end
+    #     end
+    # end
 
-    # overlaps: any two different-letter pairs sharing a cell
-    for x in 1:W, y in 1:H
-        lst = occ[x,y]
-        for i in 1:length(lst), j in (i+1):length(lst)
-            p, q = lst[i], lst[j]
-            if P[p].t != P[q].t
-                push!(conflicts, (min(p,q), max(p,q)))
-            end
-        end
-    end
-
-    # neighbor touches: for each pair, look at neighbors of its occupied cells and conflict with pairs occupying those neighbor cells
-    println("DEBUG: checking neighbor touches")
+    # println("DEBUG: checking neighbor touches")
 
     # prepare per-pair neighbor-cell lists (this is what the caller expects)
     neighcells = [Vector{Tuple{Int,Int}}() for _ in 1:length(P)]
@@ -371,27 +370,24 @@ function build_conflicts(pairs)
         # record neighbor cells for this pair (caller uses this)
         neighcells[pid] = collect(neighs)
 
-        # iterate outer neighbors (unique) once and add conflicts with pairs occupying them
-        for nb in neighs
-            nx, ny = nb
-            for q in occ[nx, ny]
-                if pid < q && P[pid].t != P[q].t
-                    push!(conflicts, (pid, q))
-                end
-            end
-        end
+        # # iterate outer neighbors (unique) once and add conflicts with pairs occupying them
+        # for nb in neighs
+        #     nx, ny = nb
+        #     for q in occ[nx, ny]
+        #         if pid < q && P[pid].t != P[q].t
+        #             push!(conflicts, (pid, q))
+        #         end
+        #     end
+        # end
     end
 
     return P, index, occ, neighcells, WS
 end
 
 # Pretty-print a reduced grid (top-left of each 2x2 block) for selected pairs
-function print_solution_grid(P::Vector{NamedTuple}, selected::Vector{Int}; title::AbstractString="")
-    if !isempty(title)
-        println(title)
-    end
+function print_solution_grid(P::Vector{NamedTuple}, selected::Vector{Int}; io::IO=stdout)
     if isempty(selected)
-        println("(no pairs)")
+        println(io, "(no pairs)")
         return
     end
     grid = fill('.', H, W)
@@ -414,7 +410,7 @@ function print_solution_grid(P::Vector{NamedTuple}, selected::Vector{Int}; title
             srcy = 2*(ry-1) + 1
             rowchars[rx] = grid[srcy, srcx]
         end
-        println(join(rowchars))
+        println(io, join(rowchars))
     end
 end
 
@@ -431,9 +427,11 @@ function pick_greedy!(k::Int, pairs::Dict{Symbol, Vector{NamedTuple}}, randomize
 
     # Weighted "cells taken" cost: occupied cells count as 1; empty neighbor cells count as 1,
     # but if a neighbor is on the outer edge band (first/last two rows/cols), it counts as 2.
-    outer_edge((x,y)) = (x == 1 || x == 2 || x == W-1 || x == W || y == 1 || y == 2 || y == H-1 || y == H)
+    # outer_edge((x,y)) = (x == 1 || x == 2 || x == W-1 || x == W || y == 1 || y == 2 || y == H-1 || y == H)
+    outer_edge((x,y)) = (min(x, y) <= 2 || max(x, y) >= N-1)
 
     function taken_cost(pr)::Int
+        # return 1 # TODO: remove
         occ = union(pr.cellsU, pr.cellsL)
         # neighbors excluding occupied
         nbs = setdiff(inflate(pr), occ)
@@ -576,10 +574,13 @@ function pick_greedy!(k::Int, pairs::Dict{Symbol, Vector{NamedTuple}}, randomize
     return chosen_indices
 end
 
+const UPS = enumerate_uppercase_placements()
+const PAIRS = build_pairs(A, UPS)
+
 # Build and solve the MILP
 function solve_pentomino(A, greedy_k::Int = 0, optimize::Bool = true, randomize::Bool = false)
-    ups   = enumerate_uppercase_placements()
-    pairs = build_pairs(A, ups)
+    # ups = deepcopy(UPS)
+    pairs = deepcopy(PAIRS)
     picked = pick_greedy!(greedy_k, pairs, randomize)
 
     println("DEBUG: built $(sum(length(pairs[t]) for t in LETTERS)) pairs")
@@ -615,7 +616,8 @@ function solve_pentomino(A, greedy_k::Int = 0, optimize::Bool = true, randomize:
     obj = NaN
     chosen = Int[]
     try
-        model = Model(HiGHS.Optimizer)  # or GLPK.Optimizer / Cbc.Optimizer / Gurobi.Optimizer
+        # model = Model(HiGHS.Optimizer)  # or GLPK.Optimizer / Cbc.Optimizer / Gurobi.Optimizer
+        model = Model(CPLEX.Optimizer)
         # set_optimizer_attribute(model, "time_limit", 120.0)  # 2-minute time limit
         # set_optimizer_attribute(model, "objective_bound", -174.0)
         # set_silent(model)
@@ -724,13 +726,25 @@ end
 
 # Simple runner when executing this file
 
-function run(greedy_k::Int = 0, optimize::Bool = true, randomize::Bool = false; verbose::Bool = true)
+function run(greedy_k::Int = 0, optimize::Bool = true, randomize::Bool = false, save_to_file::Bool = false)
     status, best, P, chosen = solve_pentomino(A, greedy_k, optimize, randomize)
-    if verbose
-        println("status: ", status)
-        println("objective: ", best)
-        println("selected pairs: ", length(chosen))
-        if !isempty(chosen)
+    
+    println("status: ", status)
+    println("objective: ", best)
+    println("selected pairs: ", length(chosen))
+    
+    if !isempty(chosen)
+        if save_to_file
+            file_name = "solution_$(best).txt"
+            println("Saving solution to $file_name")
+            open(file_name, "w") do io
+                println(io, "status: ", status)
+                println(io, "objective: ", best)
+                println(io, "selected pairs: ", length(chosen))
+                println(io, "solution grid (reduced):")
+                print_solution_grid(P, chosen; io=io)
+            end
+        else
             println("solution grid (reduced):")
             print_solution_grid(P, chosen)
         end
@@ -740,8 +754,257 @@ function run(greedy_k::Int = 0, optimize::Bool = true, randomize::Bool = false; 
     return success, best
 end
 
+function can_fill_holes(touch_counts::Matrix{Int}, cur_letter_idx::Int)
+    # quick check: count empty cells not touching any placed letter
+    bio::Matrix{Int} = zeros(Bool, W, H) # TODO: can reuse it with global cookie cntr
+
+    can_place_cnt = 0
+
+    for x in 1:W, y in 1:H
+        if bio[x,y] == 0 && touch_counts[x,y] == 0
+            start = (x,y)
+            q = [start]
+            bio[x,y] = 1
+            cnt = 1
+            # bfs flood fill to find connected component size
+            while !isempty(q)
+                (cx,cy) = pop!(q)
+                for (dx,dy) in [(-1,0),(1,0),(0,-1),(0,1)]
+                    nx, ny = cx+dx, cy+dy
+                    if 1 ≤ nx ≤ W && 1 ≤ ny ≤ H && bio[nx,ny] == 0 && touch_counts[nx,ny] == 0
+                        bio[nx,ny] = 1
+                        push!(q, (nx,ny))
+                        cnt += 1
+                    end
+                end
+            end
+            component_cnt = cnt ÷ length(SHAPES[:I]) # should be 20
+            can_place_cnt += component_cnt
+
+            # if can_place_cnt >= length(LETTERS) - cur_letter_idx + 1
+            #    return true
+            # end
+        end
+    end
+
+    if cur_letter_idx >= 5
+        println("DEBUG: can_place_cnt = $can_place_cnt for cur_letter_idx = $cur_letter_idx")
+    end
+
+    return can_place_cnt >= length(LETTERS) - cur_letter_idx + 1
+end
+
+const node_count = Ref(0)
+const cur_letters::Array{Symbol} = LETTERS # Fixed letter order
+
+## Greedy DFS for recursive letter selection and model solve
+function greedy_dfs(
+    pairs::Dict{Symbol, Vector{NamedTuple}},
+    cur_letter_idx::Int, 
+    depth,
+    fixed_chosen::Vector{Symbol} = Symbol[],
+    touch_counts::Matrix{Int} = zeros(Int, W, H),
+    save_to_file::Bool = true,
+)
+    global node_count, cur_letters
+    node_count[] += 1
+    if node_count[] % 100 == 0
+        println("DEBUG: DFS at depth $depth, node $(node_count[])")
+    end
+
+    if !can_fill_holes(touch_counts, cur_letter_idx) # prune branches that dont have enough empty space
+        return :NO_SOLUTION, NaN, [], Int[]
+    end
+
+    branch_factor = 5 # how many top candidates to try per letter
+
+    if depth <= 0
+        status = :ERROR
+        obj = NaN
+        chosen = Int[]
+        # Build conflicts from the pruned pairs
+        P, index, occ, neighcells, WS = build_conflicts(pairs)
+        if length(P) == 0
+            return :NO_PAIRS, NaN, P, Int[]
+        end
+        # println("DFS at depth 0: building model with ", length(P), " pairs")
+        # try
+        #     model = Model()
+        #     @variable(model, y[1:length(P)], Bin)
+        #     # Fix variables for letters already chosen in upper DFS levels
+        #     # exactly one pair per every other letter
+        #     for t in LETTERS
+        #         ids = index[t]
+        #         if t in fixed_chosen
+        #             push!(chosen, ids[1])
+        #             @constraint(model, y[ids[1]] == 1)
+        #         else
+        #             @constraint(model, sum(y[i] for i in ids) == 1)
+        #         end
+        #     end
+        #     # 3x3 neighborhood constraints
+        #     for i in 2:2:W-1, j in 2:2:H-1
+        #         ids = Int[]
+        #         for dx in -1:1, dy in -1:1
+        #             nx, ny = i + dx, j + dy
+        #             if 1 ≤ nx ≤ W && 1 ≤ ny ≤ H
+        #                 append!(ids, occ[nx, ny])
+        #             end
+        #         end
+        #         ids = unique(ids)
+        #         if !isempty(ids)
+        #             @constraint(model, sum(y[k] for k in ids) ≤ 1)
+        #         end
+        #     end
+        #     # Small-M constraints for pairs' neighbors
+        #     for pid in eachindex(P)
+        #         qs = Int[]
+        #         for nb in neighcells[pid]
+        #             nx, ny = nb
+        #             append!(qs, occ[nx, ny])
+        #         end
+        #         qs = unique(qs)
+        #         filter!(q -> q != pid && P[q].t != P[pid].t, qs)
+        #         M = min(12, length(qs))
+        #         if !isempty(qs)
+        #             @constraint(model, sum(y[q] for q in qs) ≤ M * (1 - y[pid]))
+        #         end
+        #     end
+        #     @objective(model, Max, sum(P[i].weight * y[i] for i in 1:length(P)))
+
+        #     nvar = JuMP.num_variables(model)
+        #     n_le = MOI.get(model, MOI.NumberOfConstraints{MOI.ScalarAffineFunction{Float64}, MOI.LessThan{Float64}}())
+        #     n_eq = MOI.get(model, MOI.NumberOfConstraints{MOI.ScalarAffineFunction{Float64}, MOI.EqualTo{Float64}}())
+        #     ncons = n_le + n_eq
+
+        #     if max(nvar, ncons) > 1000
+        #         set_optimizer(model, HiGHS.Optimizer)
+        #     else
+        #         set_optimizer(model, CPLEX.Optimizer)
+        #     end
+
+        #     print_solution_grid(P, chosen)
+
+        #     optimize!(model)
+        #     status = termination_status(model)
+        #     try
+        #         obj = objective_value(model)
+        #         best = round(Int, obj)
+        #         chosen = findall(i -> value(y[i]) > 0.5, 1:length(P))
+        #         println("DFS: found solution with objective ", obj, " and ", length(chosen), " pairs")
+
+        #         if save_to_file && length(chosen) == length(LETTERS)
+        #             file_name = "solution_$(best).txt"
+        #             println("Saving solution to $file_name")
+        #             open(file_name, "w") do io
+        #                 println(io, "status: ", status)
+        #                 println(io, "objective: ", best)
+        #                 println(io, "selected pairs: ", length(chosen))
+        #                 println(io, "solution grid (reduced):")
+        #                 print_solution_grid(P, chosen; io=io)
+        #             end
+        #         end
+        #     catch _err
+        #         obj = NaN
+        #         chosen = Int[]
+        #         println("DFS: failed to extract objective value")
+        #     end
+        # catch err
+        #     println("ERROR: building or solving model failed") # err
+        #     return :ERROR, NaN, P, Int[]
+        # end
+        return status, obj, P, chosen
+    end
+
+    best_status = :NO_SOLUTION
+    best_obj = -Inf
+    best_P = []
+    best_chosen = Int[]
+
+    t = cur_letters[cur_letter_idx]
+    candidates = pairs[t]
+    
+    if isempty(candidates)
+        return :ERROR, NaN, P, Int[]
+    end
+    function pair_value(pr)
+        return pr.weight / (length(pr.cellsU) + length(pr.cellsL))
+    end
+    sorted = sort(candidates, by=pair_value, rev=true)
+    top_candidates = sorted[1:min(branch_factor, length(sorted))] # TODO: going to improve this
+    # println("  For letter ", t, ": trying ", length(top_candidates), " pairs")
+    for (i, pr) in enumerate(top_candidates)
+        # println("    Pair ", i, " for letter ", t, ": weight=", pr.weight, " cells=", length(union(pr.cellsU, pr.cellsL)))
+        next_pairs = deepcopy(pairs)
+        next_pairs[t] = [pr]
+        # Track this fixed selection and update touch counts on inflated cells
+        push!(fixed_chosen, t) 
+        inflated_cells = inflate(pr)
+        for (x,y) in inflated_cells
+            # use [y,x] to match grid[y,x] convention
+            if in_bounds((x,y))
+                touch_counts[y, x] += 1
+            end
+        end
+        blocked_region = inflate(pr)
+        pruned_count = 0
+        for other_t in LETTERS
+            if other_t == t
+                continue
+            end
+            if isempty(next_pairs[other_t])
+                continue
+            end
+            before_count = length(next_pairs[other_t])
+            keep = filter(other_pr -> !any(c -> c in blocked_region, union(other_pr.cellsU, other_pr.cellsL)), next_pairs[other_t])
+            next_pairs[other_t] = keep
+            pruned_count += before_count - length(keep)
+        end
+        # println("      Pruned ", pruned_count, " incompatible pairs")
+        status, obj, P, chosen = greedy_dfs(next_pairs, cur_letter_idx + 1, depth - 1, fixed_chosen, touch_counts, save_to_file)
+        # Backtrack: undo touch counts and fixed selection
+        for (x,y) in inflated_cells
+            if in_bounds((x,y))
+                touch_counts[y, x] -= 1
+            end
+        end
+        pop!(fixed_chosen)
+        if isfinite(obj) && obj > best_obj
+            best_status = status
+            best_obj = obj
+            best_P = P
+            best_chosen = chosen
+            println("      New best at depth ", 5 - depth, ": ", obj)
+        end
+    end
+
+    return best_status, best_obj, best_P, best_chosen
+end
+
+# Wrapper to run greedy_dfs and print results
+function run_greedy_dfs(depth = 5, save_to_file = true)
+    global node_count, cur_letters
+    node_count[] = 0
+    pairs = deepcopy(PAIRS)
+    cur_letters = [:W, :U, :I, :L, :P, :X, :N, :Z, :T, :F, :V, :Y]
+    # Reusable state for DFS
+    fixed_chosen = Vector{Symbol}()
+    touch_counts = fill(0, H, W)
+    status, obj, P, chosen = greedy_dfs(pairs, 1, depth, fixed_chosen, touch_counts, save_to_file)
+    println("========================================")
+    println("Total DFS nodes visited: ", node_count[])
+    println("Greedy DFS search results:")
+    println("Status: ", status)
+    println("Objective: ", obj)
+    println("Selected pairs: ", length(chosen))
+    if !isempty(chosen)
+        println("Solution grid (reduced):")
+        print_solution_grid(P, chosen)
+    end
+end
+
 # Keep running randomized greedy (k=5) until an optimal solution is proven or max_tries is reached
-function run_many(greedy_k::Int = 5, max_tries::Int = 1000; optimize::Bool = true, randomize::Bool = true, stop_on_success::Bool = true, verbose_runs::Bool = true)
+function run_many(greedy_k::Int = 5, max_tries::Int = 5000; optimize::Bool = true, randomize::Bool = true, stop_on_success::Bool = false)
     total_ns = 0.0
     successes = 0
     best = -Inf
@@ -751,7 +1014,7 @@ function run_many(greedy_k::Int = 5, max_tries::Int = 1000; optimize::Bool = tru
     for attempt in 1:max_tries
         print("Attempt #$attempt: ")
         t0 = time_ns()
-        success, score = run(greedy_k, optimize, randomize; verbose = verbose_runs)
+        success, score = run(greedy_k, optimize, randomize, true)
         last_score = score
         dt_ns = (time_ns() - t0)
         total_ns += dt_ns
@@ -763,6 +1026,9 @@ function run_many(greedy_k::Int = 5, max_tries::Int = 1000; optimize::Bool = tru
         if isfinite(score) && (score > best)
             best = score
             best_run = attempt
+
+            file_name = "best_many_" + string(best) + ".txt"
+            println("New best score $best on attempt #$attempt; saving to $file_name")
         end
 
         if stop_on_success && success
